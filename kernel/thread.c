@@ -80,6 +80,9 @@ static thread_t _idle_thread;
 #define idle_thread(cpu) (&_idle_thread)
 #endif
 
+/* list of dead threads needing teardown */
+static struct list_node thread_dead_list;
+
 /* local routines */
 static void thread_resched(void);
 static void idle_thread_routine(void) __NO_RETURN;
@@ -411,7 +414,7 @@ void thread_exit(int retcode)
     current_thread->state = THREAD_DEATH;
     current_thread->retcode = retcode;
 
-    /* if we're detached, then do our teardown here */
+    /* if we're detached, then start doing our teardown here */
     if (current_thread->flags & THREAD_FLAG_DETACHED) {
         /* remove it from the master thread list */
         list_delete(&current_thread->thread_list_node);
@@ -419,16 +422,9 @@ void thread_exit(int retcode)
         /* clear the structure's magic */
         current_thread->magic = 0;
 
-        /* free its stack and the thread structure itself */
-        if (current_thread->flags & THREAD_FLAG_FREE_STACK && current_thread->stack) {
-            heap_delayed_free(current_thread->stack);
-
-            /* make sure its not going to get a bounds check performed on the half-freed stack */
-            current_thread->flags &= ~THREAD_FLAG_DEBUG_STACK_BOUNDS_CHECK;
-        }
-
-        if (current_thread->flags & THREAD_FLAG_FREE_STRUCT)
-            heap_delayed_free(current_thread);
+        /* the rest of the teardown, i.e. freeing the stack and the thread
+         * structure itself, is done in thread_resched */
+        list_add_tail(&thread_dead_list, &current_thread->thread_list_node);
     } else {
         /* signal if anyone is waiting */
         wait_queue_wake_all(&current_thread->retcode_wait_queue, false, 0);
@@ -487,6 +483,8 @@ static thread_t *get_top_thread(int cpu)
  */
 void thread_resched(void)
 {
+    /* we need to access the old thread again after the context switch was
+     * performed, thus it has to survive the actual context switch */
     thread_t *oldthread;
     thread_t *newthread;
 
@@ -612,6 +610,21 @@ void thread_resched(void)
 
     /* do the low level context switch */
     arch_context_switch(oldthread, newthread);
+
+    /* if there are old threads that need cleanup, free its structures */
+    thread_t *dead, *tmp;
+    list_for_every_entry_safe(&thread_dead_list, dead, tmp, thread_t, thread_list_node) {
+        DEBUG_ASSERT(dead->state == THREAD_DEATH);
+        DEBUG_ASSERT(dead->state == THREAD_DEATH && dead->flags & THREAD_FLAG_DETACHED);
+        list_delete(&dead->queue_node);
+        /* free its stack and the thread structure itself */
+        if (dead->flags & THREAD_FLAG_FREE_STACK && dead->stack) {
+            heap_delayed_free(dead->stack);
+        }
+
+        if (dead->flags & THREAD_FLAG_FREE_STRUCT)
+            heap_delayed_free(dead);
+    }
 }
 
 /**
@@ -805,6 +818,7 @@ void thread_init_early(void)
 
     /* initialize the thread list */
     list_initialize(&thread_list);
+    list_initialize(&thread_dead_list);
 
     /* create a thread to cover the current running state */
     thread_t *t = idle_thread(0);
