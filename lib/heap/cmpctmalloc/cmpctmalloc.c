@@ -639,7 +639,8 @@ static void *large_alloc(size_t size)
     free_t *free_area = NULL;
     lock();
     if (heap_grow(size, &free_area) < 0) {
-      return 0;
+        unlock();
+        return 0;
     }
     void *result =
         create_allocation_header(free_area, 0, free_area->header.size, free_area->header.left);
@@ -790,6 +791,8 @@ void *cmpct_memalign(size_t size, size_t alignment)
     size_t padded_size =
         size + alignment + sizeof(free_t) + sizeof(header_t);
     char *unaligned = (char *)cmpct_alloc(padded_size);
+    if (unaligned == NULL)
+        return NULL;
     lock();
     size_t mask = alignment - 1;
     uintptr_t payload_int = (uintptr_t)unaligned + sizeof(free_t) +
@@ -857,6 +860,8 @@ void *cmpct_realloc(void *payload, size_t size)
     header_t *header = (header_t *)payload - 1;
     size_t old_size = header->size - sizeof(header_t);
     void *new_payload = cmpct_alloc(size);
+    if (new_payload == NULL)
+        return NULL;
     memcpy(new_payload, payload, MIN(size, old_size));
     cmpct_free(payload);
     return new_payload;
